@@ -12,7 +12,7 @@ cd libcamera
 meson build
 ninja -C build install
 ```
-Referring to [libcamera website](https://libcamera.org/getting-started.html), The dependent packages are required for building libcamera. Run `build/src/cam/cam -l` and list the camera available.
+Referring to [libcamera](https://libcamera.org/getting-started.html), The dependent packages are required for building libcamera. Run `build/src/cam/cam -l` and list the camera available.
 
 You can use the pipeline hanlder isp for tesing isp algorithm. First, you need to add corresponding file in this repository to corresponding folder in libcamera.
 Then just following below command:
