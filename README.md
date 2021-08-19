@@ -1,8 +1,9 @@
 # GSoc2021
-This is the summit work repository for GSoC2021.
+This is the summit work repository for GSoC2021, including the code and patches. For more details, you can refer my [blog](https://starkfan007.github.io/Gsoc-summit-work/).
 
-## Background
-Because image signal processing involves a large amount of data and strict real-time requirements, ISP usually adopts hardware implementation. making it difficult to customize the imaging algorithm for developers. Especially in certain scenarios, the default camera pipeline may not meet the imaging requirements, and we need to design better algorithms. So a software-based ISP would be useful for testing and experimentation.
+## Hardware
+So far, only three cameras officially supported by the Raspberry Pi can use libcamera to get Bayer format. They are ov5647, imx219, and imx477. Maybe other CSI cameras can also do it, but I haven't tested. Therefore, in order to run this, you need a Raspberry Pi 3/4 and a matching camera.
+
 ## Install
 To fetch the sources, build and install:
 ```
