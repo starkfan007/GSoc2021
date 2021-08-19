@@ -1,10 +1,10 @@
 # GSoc2021
 This is the summit work repository for GSoc2021, including the code and patches. In short, I need to implement the software ISP in libcamera. For more details, you can refer my [blog](https://starkfan007.github.io/Gsoc-summit-work/).
 
-## Hardware
+## Hardware support
 So far, only three cameras officially supported by the Raspberry Pi can use libcamera to get Bayer format. They are ov5647, imx219, and imx477. Maybe other CSI cameras can also do it, but I haven't tested. Therefore, in order to run this, you need a Raspberry Pi 3/4 and a matching camera.
 
-## Install
+## Install and test
 Referring to [here](https://libcamera.org/getting-started.html), The dependent packages are required for building libcamera.   
 Then you can fetch the sources, build and install:
 ```
