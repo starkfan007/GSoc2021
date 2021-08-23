@@ -1,0 +1,355 @@
+From e9bdef9d9279f41ba05d365f821cd1b821e000e2 Mon Sep 17 00:00:00 2001
+From: Fan Siyuan <siyuan.fan@foxmail.com>
+Date: Tue, 3 Aug 2021 13:08:07 +0100
+Subject: [RFC PATCH v1 1/3] pipeline: isp: The software ISP-based pipeline handler
+
+Add class PipelineHandlerISP to connect three parts, including application, Camera Sensor
+and ISP processing. The process is roughly as follows.
+
+The application requests the format and size of rgb image(e.x. RGB888 640x480),
+then pipeline handler configures the format and size of raw image (e.x. BGGR10 640X480)
+and calls V4L2VideoDevice::allocateBuffers and V4L2VideoDevice::queueBuffer to queue raw buffer. 
+When bufferReady signal is emitted, which means that the raw buffer is filled with data captured by camera sensor.
+Later, pipeline handler calls the bufferReady function to pass the raw buffer to class isp::processing
+and the raw buffer is processed by isp pipeline. When processing done, the rgb buffer is exported to application
+by PipelineHandlerISP::exportFrameBuffers.
+
+Signed-off-by: Fan Siyuan <siyuan.fan@foxmail.com>
+
+---
+ src/libcamera/pipeline/isp/isp.cpp | 323 +++++++++++++++++++++++++++++
+ 1 file changed, 323 insertions(+)
+ create mode 100644 src/libcamera/pipeline/isp/isp.cpp
+
+diff --git a/src/libcamera/pipeline/isp/isp.cpp b/src/libcamera/pipeline/isp/isp.cpp
+new file mode 100644
+index 00000000..e5fbd536
+--- /dev/null
++++ b/src/libcamera/pipeline/isp/isp.cpp
+@@ -0,0 +1,323 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2021, Siyuan Fan <siyuan.fan@foxmail.com>
++ *
++ * isp.cpp - The software ISP-based pipeline handler
++ */
++
++#include "isp_processing.h"
++
++#include <math.h>
++#include <stdlib.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <libcamera/camera.h>
++#include <libcamera/control_ids.h>
++#include <libcamera/controls.h>
++#include <libcamera/formats.h>
++
++#include "libcamera/base/thread.h"
++#include "libcamera/internal/device_enumerator.h"
++#include "libcamera/internal/media_device.h"
++#include "libcamera/internal/pipeline_handler.h"
++#include "libcamera/internal/v4l2_videodevice.h"
++
++namespace libcamera {
++
++LOG_DEFINE_CATEGORY(ISP)
++
++class ISPCameraData : public CameraData
++{
++public:
++       ISPCameraData(PipelineHandler *pipe, MediaDevice *media)
++               : CameraData(pipe), media_(media), video_(nullptr)
++       {
++       }
++
++       ~ISPCameraData()
++       {
++               delete video_;
++               delete rawBuffers;
++       }
++
++       int init();
++       void bufferReady(FrameBuffer *buffer);
++       void ISPCompleted(FrameBuffer *buffer);
++
++       Stream stream_;
++       ISP isp_;
++       Thread threadISP_;
++       int width;
++       int height;
++
++       MediaDevice *media_;
++       V4L2VideoDevice *video_;
++       std::vector<std::unique_ptr<FrameBuffer>> *tempCopyExportBuffers;
++       std::vector<std::unique_ptr<FrameBuffer>> *rawBuffers;
++       std::map<FrameBuffer *, FrameBuffer *>  bufferPair;
++};
++
++
++class ISPCameraConfiguration : public CameraConfiguration
++{
++public:
++       ISPCameraConfiguration();
++
++       Status validate() override;
++};
++
++class PipelineHandlerISP : public PipelineHandler
++{
++public:
++       PipelineHandlerISP(CameraManager *manager);
++
++       CameraConfiguration *generateConfiguration(Camera *camera,
++                                                   const StreamRoles &roles) override;
++       int configure(Camera *camera, CameraConfiguration *config) override;
++
++       int exportFrameBuffers(Camera *camera, Stream *stream,
++                               std::vector<std::unique_ptr<FrameBuffer>> *buffers) override;
++
++       int start(Camera *camera, const ControlList *controls) override;
++       void stop(Camera *camera) override;
++
++       int queueRequestDevice(Camera *camera, Request *request) override;
++
++       bool match(DeviceEnumerator *enumerator) override;
++
++private:
++       ISPCameraData *cameraData(const Camera *camera)
++       {
++               return static_cast<ISPCameraData *>(
++                       PipelineHandler::cameraData(camera));
++       }
++};
++
++ISPCameraConfiguration::ISPCameraConfiguration()
++       : CameraConfiguration()
++{
++}
++
++CameraConfiguration::Status ISPCameraConfiguration::validate()
++{
++       Status status = Valid;
++
++       return status;
++}
++
++PipelineHandlerISP::PipelineHandlerISP(CameraManager *manager)
++       : PipelineHandler(manager)
++{
++}
++
++CameraConfiguration *PipelineHandlerISP::generateConfiguration(Camera *camera,
++                                                               const StreamRoles &roles)
++{
++       ISPCameraData *data = cameraData(camera);
++       CameraConfiguration *config = new ISPCameraConfiguration();
++
++       if (roles.empty())
++               return config;
++
++       std::map<V4L2PixelFormat, std::vector<SizeRange>> v4l2Formats =
++               data->video_->formats();
++       std::map<PixelFormat, std::vector<SizeRange>> deviceFormats;
++       std::transform(v4l2Formats.begin(), v4l2Formats.end(),
++               std::inserter(deviceFormats, deviceFormats.begin()),
++               [&](const decltype(v4l2Formats)::value_type &format) {
++                   return decltype(deviceFormats)::value_type{
++                       format.first.toPixelFormat(),
++                       format.second
++                   };
++               });
++
++       StreamFormats formats(deviceFormats);
++       StreamConfiguration cfg(formats);
++
++       cfg.pixelFormat = formats::RGB888;
++       cfg.size = { 640, 480 };
++       cfg.bufferCount = 4;
++
++       config->addConfiguration(cfg);
++
++       config->validate();
++
++       return config;
++}
++
++int PipelineHandlerISP::configure(Camera *camera, CameraConfiguration *config)
++{
++       ISPCameraData *data = cameraData(camera);
++       StreamConfiguration &cfg = config->at(0);
++
++       V4L2VideoDevice::Formats fmts = data->video_->formats();
++       V4L2PixelFormat v4l2Format = fmts.begin()->first;
++
++       V4L2DeviceFormat format = {};
++       format.fourcc = v4l2Format;
++       format.size = cfg.size;
++
++       data->width = format.size.width;
++       data->height = format.size.height;
++
++       int ret = data->video_->setFormat(&format);
++       if (ret)
++               return ret;
++
++       cfg.setStream(&data->stream_);
++       cfg.stride = format.planes[0].bpl;
++
++       return 0;
++}
++
++int PipelineHandlerISP::exportFrameBuffers(Camera *camera, Stream *stream,
++                                           std::vector<std::unique_ptr<FrameBuffer>> *buffers)
++{
++       unsigned int count = stream->configuration().bufferCount;
++       ISPCameraData *data = cameraData(camera);
++       
++       for (unsigned int i = 0; i < count; i++) {
++              std::string name = "frame-" + std::to_string(i);
++              const int isp_fd = memfd_create(name.c_str(), 0);
++              int ret = ftruncate(isp_fd, data->width * data->height * 3);
++              if (ret < 0) {
++                     LOG(ISP, Error)
++                            << "truncate: "
++                            << strerror(-ret);
++                     return ret;
++              }
++              FileDescriptor temp = FileDescriptor(std::move(isp_fd));
++
++              FrameBuffer::Plane rgbPlane;
++              rgbPlane.fd = std::move(temp);
++              rgbPlane.length = data->width * data->height * 3;
++
++              std::vector<FrameBuffer::Plane> planes;
++              planes.push_back(std::move(rgbPlane));
++              std::unique_ptr<FrameBuffer> buffer = std::make_unique<FrameBuffer>(std::move(planes));
++              buffers->push_back(std::move(buffer));
++       }
++
++       data->tempCopyExportBuffers = buffers;
++
++       return count;       
++
++}
++
++int PipelineHandlerISP::start(Camera *camera, [[maybe_unused]] const ControlList *controls)
++{
++       ISPCameraData *data = cameraData(camera);
++       unsigned int count = data->stream_.configuration().bufferCount;
++
++       data->rawBuffers = new std::vector<std::unique_ptr<FrameBuffer>>;
++       int ret = data->video_->allocateBuffers(count, data->rawBuffers);
++       if (ret < 0) {
++              LOG(ISP, Error) << strerror(-ret);
++              return ret;
++       }
++
++       for (unsigned int i = 0; i < count; i++)
++              data->bufferPair[data->tempCopyExportBuffers->at(i).get()] = data->rawBuffers->at(i).get();
++
++       ret = data->video_->streamOn();
++       if (ret < 0) {
++               data->video_->releaseBuffers();
++               return ret;
++       }
++
++       data->threadISP_.start();
++
++       return 0;
++}
++
++void PipelineHandlerISP::stop(Camera *camera)
++{
++       ISPCameraData *data = cameraData(camera);
++
++       data->threadISP_.exit();
++       data->threadISP_.wait();
++
++       data->video_->streamOff();
++       data->video_->releaseBuffers();
++}
++
++int PipelineHandlerISP::queueRequestDevice(Camera *camera, Request *request)
++{
++       ISPCameraData *data = cameraData(camera);
++       FrameBuffer *rgbBuffer = request->findBuffer(&data->stream_);
++       
++       if (!rgbBuffer) {
++               LOG(ISP, Error) << "Attempt to queue request with invalid stream";
++               return -ENOENT;
++       }
++
++       int ret = data->video_->queueBuffer(data->bufferPair[rgbBuffer]);
++       if (ret < 0)
++               return ret;
++
++       return 0;
++}
++
++bool PipelineHandlerISP::match(DeviceEnumerator *enumerator)
++{
++       DeviceMatch unicam("unicam");
++
++       unicam.add("unicam-embedded");
++       unicam.add("unicam-image");
++
++       MediaDevice *unicam_ = acquireMediaDevice(enumerator, unicam);
++       if (!unicam_) {
++               LOG(ISP, Debug) << "unicam Device not found";
++               return false;
++       }
++
++       LOG(ISP, Debug) << "unicam Device Identified";
++
++       std::unique_ptr<ISPCameraData> data = std::make_unique<ISPCameraData>(this, unicam_);
++
++       if(data->init()) return false;
++
++       std::set<Stream *> streams{&data->stream_};
++       std::shared_ptr<Camera> camera = Camera::create(this, data->video_->deviceName(), streams);
++       registerCamera(std::move(camera), std::move(data));
++
++       return true;
++}
++
++
++void ISPCameraData::ISPCompleted(FrameBuffer *buffer)
++{
++       Request *request = buffer->request();
++
++       pipe_->completeBuffer(request, buffer);
++       pipe_->completeRequest(request);
++
++}
++
++void ISPCameraData::bufferReady(FrameBuffer *buffer)
++{
++       for (std::map<FrameBuffer*, FrameBuffer*>::iterator it = bufferPair.begin(); it != bufferPair.end(); it++) {
++              if (it->second == buffer)
++                     isp_.invokeMethod(&ISP::processing, ConnectionTypeQueued, buffer, it->first, width, height);
++       }
++       
++}
++
++int ISPCameraData::init()
++{
++       video_ = new V4L2VideoDevice(media_->getEntityByName("unicam-image"));
++       if (video_->open())
++               return -ENODEV;
++
++       video_->bufferReady.connect(this, &ISPCameraData::bufferReady);
++
++       isp_.moveToThread(&threadISP_);
++       isp_.ispCompleted.connect(this, &ISPCameraData::ISPCompleted);
++
++       return 0;
++}
++
++REGISTER_PIPELINE_HANDLER(PipelineHandlerISP)
++
++} /* namespace libcamera */
+-- 
+2.20.1
+

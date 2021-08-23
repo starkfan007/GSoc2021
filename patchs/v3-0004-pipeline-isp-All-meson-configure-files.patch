@@ -1,0 +1,42 @@
+From 461974f088bd9f9fb8124b71c5bc18821ca61248 Mon Sep 17 00:00:00 2001
+From: Fan Siyuan <siyuan.fan@foxmail.com>
+Date: Tue, 3 Aug 2021 13:17:33 +0100
+Subject: [libcamera-devel] [RFC PATCH v3 4/4] pipeline: isp: All meson
+ configure files
+
+Signed-off-by: Fan Siyuan <siyuan.fan@foxmail.com>
+---
+ meson_options.txt                      | 2 +-
+ src/libcamera/pipeline/isp/meson.build | 6 ++++++
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+ create mode 100644 src/libcamera/pipeline/isp/meson.build
+
+diff --git a/meson_options.txt b/meson_options.txt
+index 2c80ad8b..03110587 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -37,7 +37,7 @@ option('lc-compliance',
+ 
+ option('pipelines',
+         type : 'array',
+-        choices : ['ipu3', 'raspberrypi', 'rkisp1', 'simple', 'uvcvideo', 'vimc'],
++        choices : ['ipu3', 'raspberrypi', 'rkisp1', 'simple', 'uvcvideo', 'vimc', 'isp'],
+         description : 'Select which pipeline handlers to include')
+ 
+ option('qcam',
+diff --git a/src/libcamera/pipeline/isp/meson.build b/src/libcamera/pipeline/isp/meson.build
+new file mode 100644
+index 00000000..1e80ea84
+--- /dev/null
++++ b/src/libcamera/pipeline/isp/meson.build
+@@ -0,0 +1,6 @@
++# SPDX-License-Identifier: CC0-1.0
++
++libcamera_sources += files([
++    'isp.cpp',
++    '../../swisp/isp.cpp'
++])
+\ No newline at end of file
+-- 
+2.20.1
+

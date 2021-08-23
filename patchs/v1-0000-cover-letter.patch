@@ -1,0 +1,34 @@
+From e686176b7fcd138c6b8684c81c8bcdb9676697ff Mon Sep 17 00:00:00 2001
+From: Fan Siyuan <siyuan.fan@foxmail.com>
+Date: Tue, 3 Aug 2021 14:35:05 +0100
+Subject: [RFC PATCH v1 0/3] pipeline: isp: The software ISP Module
+
+This patch series adds support for CPU-based software ISP.
+
+Patch 1/3 add software ISP-based pipeline handler. Patch 2/3 add 
+software ISP class. Patch 3/3 add all meson configure files.
+
+This is a RFC patch because so far the buffer processed by pipeline
+cannot be output due to lack of metadata information which needs to
+apply the ISP friend class in class FrameBuffer just like V4L2VideoDevice. 
+
+
+Fan Siyuan (3):
+  pipeline: isp: The software ISP-based pipeline handler
+  pipeline: isp: The software ISP class
+  pipeline: isp: All meson configure files
+
+ meson_options.txt                             |   2 +-
+ src/libcamera/pipeline/isp/isp.cpp            | 323 ++++++++++
+ src/libcamera/pipeline/isp/isp_processing.cpp | 593 ++++++++++++++++++
+ src/libcamera/pipeline/isp/isp_processing.h   |  62 ++
+ src/libcamera/pipeline/isp/meson.build        |   6 +
+ 5 files changed, 985 insertions(+), 1 deletion(-)
+ create mode 100644 src/libcamera/pipeline/isp/isp.cpp
+ create mode 100644 src/libcamera/pipeline/isp/isp_processing.cpp
+ create mode 100644 src/libcamera/pipeline/isp/isp_processing.h
+ create mode 100644 src/libcamera/pipeline/isp/meson.build
+
+-- 
+2.20.1
+

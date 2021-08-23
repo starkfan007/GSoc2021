@@ -1,0 +1,34 @@
+From 495c47994a2aaac16ccd81e3356dabc42706a251 Mon Sep 17 00:00:00 2001
+From: Fan Siyuan <siyuan.fan@foxmail.com>
+Date: Wed, 11 Aug 2021 07:04:30 +0100
+Subject: [libcamera-devel] [RFC PATCH v2 0/4] pipeline: isp: The software ISP module
+
+This patch series fix some of issues raised last commits. Now the test module of
+software isp can output the RGB888 format image.
+
+Patch 1/4 fixs the pipeline handler and make it more concise. Patch 2/4 moves the
+previous ISP process to libcamera/swisp for general API interface. Patch 3/4 adds
+the friend class CPU_ISP in class FrameBuffer to access the private member metadata_.
+Patch 4/4 modifies the dependent file path.
+
+Fan Siyuan (4):
+  pipeline: isp: The software ISP-based pipeline handler
+  libcamera: swisp: The software ISP class
+  libcamera: framebuffer: Add the friend class CPU_ISP
+  pipeline: isp: All meson configure files
+
+ include/libcamera/framebuffer.h        |   1 +
+ meson_options.txt                      |   2 +-
+ src/libcamera/pipeline/isp/isp.cpp     | 306 ++++++++++++
+ src/libcamera/pipeline/isp/meson.build |   6 +
+ src/libcamera/swisp/isp.cpp            | 643 +++++++++++++++++++++++++
+ src/libcamera/swisp/isp.h              |  92 ++++
+ 6 files changed, 1049 insertions(+), 1 deletion(-)
+ create mode 100644 src/libcamera/pipeline/isp/isp.cpp
+ create mode 100644 src/libcamera/pipeline/isp/meson.build
+ create mode 100644 src/libcamera/swisp/isp.cpp
+ create mode 100644 src/libcamera/swisp/isp.h
+
+-- 
+2.20.1
+

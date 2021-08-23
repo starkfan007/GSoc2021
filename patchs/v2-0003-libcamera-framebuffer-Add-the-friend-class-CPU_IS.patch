@@ -1,0 +1,28 @@
+From 4b17e5c70c5b30c114a2215c16ffcf992468f804 Mon Sep 17 00:00:00 2001
+From: Fan Siyuan <siyuan.fan@foxmail.com>
+Date: Tue, 10 Aug 2021 11:55:23 +0100
+Subject: [libcamera-devel] [RFC PATCH v2 3/4] libcamera: framebuffer: Add the
+ friend class CPU_ISP
+
+ In order to fill in dstBuffer->metadata(), we need to add the friend class CPU_ISP.
+
+Signed-off-by: Fan Siyuan <siyuan.fan@foxmail.com>
+---
+ include/libcamera/framebuffer.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/include/libcamera/framebuffer.h b/include/libcamera/framebuffer.h
+index 28307890..9cc1b760 100644
+--- a/include/libcamera/framebuffer.h
++++ b/include/libcamera/framebuffer.h
+@@ -61,6 +61,7 @@ private:
+ 	LIBCAMERA_DISABLE_COPY_AND_MOVE(FrameBuffer)
+ 
+ 	friend class V4L2VideoDevice; /* Needed to update metadata_. */
++	friend class CPU_ISP;
+ 
+ 	std::vector<Plane> planes_;
+ 
+-- 
+2.20.1
+

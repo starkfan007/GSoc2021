@@ -1,0 +1,26 @@
+From df8ea03d513c5b99aa8882944daa89e946f816ea Mon Sep 17 00:00:00 2001
+From: Fan Siyuan <siyuan.fan@foxmail.com>
+Date: Tue, 10 Aug 2021 11:55:23 +0100
+Subject: [libcamera-devel] [RFC PATCH v3 3/4] libcamera: framebuffer: Add the
+ friend class ISPCPU
+
+Signed-off-by: Fan Siyuan <siyuan.fan@foxmail.com>
+---
+ include/libcamera/framebuffer.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/include/libcamera/framebuffer.h b/include/libcamera/framebuffer.h
+index 28307890..ddf6a0af 100644
+--- a/include/libcamera/framebuffer.h
++++ b/include/libcamera/framebuffer.h
+@@ -61,6 +61,7 @@ private:
+ 	LIBCAMERA_DISABLE_COPY_AND_MOVE(FrameBuffer)
+ 
+ 	friend class V4L2VideoDevice; /* Needed to update metadata_. */
++	friend class ISPCPU;
+ 
+ 	std::vector<Plane> planes_;
+ 
+-- 
+2.20.1
+

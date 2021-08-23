@@ -1,0 +1,689 @@
+From 4d59c81408430f82df3c59c1a653809f4a5af8b9 Mon Sep 17 00:00:00 2001
+From: Fan Siyuan <siyuan.fan@foxmail.com>
+Date: Tue, 3 Aug 2021 13:09:53 +0100
+Subject: [RFC PATCH v1 2/3] pipeline: isp: The software ISP class
+
+Add the software ISP class only CPU-based. So far the basic alogrithm
+includes black level correct, bilinear demosaic interpolation, auto 
+white balance(gray world), tone mapping(auto contrast), gamma correct.
+bilateral filter, 10bit to 8bit compression.
+
+Signed-off-by: Fan Siyuan <siyuan.fan@foxmail.com>
+
+---
+ src/libcamera/pipeline/isp/isp_processing.cpp | 593 ++++++++++++++++++
+ src/libcamera/pipeline/isp/isp_processing.h   |  62 ++
+ 2 files changed, 655 insertions(+)
+ create mode 100644 src/libcamera/pipeline/isp/isp_processing.cpp
+ create mode 100644 src/libcamera/pipeline/isp/isp_processing.h
+
+diff --git a/src/libcamera/pipeline/isp/isp_processing.cpp b/src/libcamera/pipeline/isp/isp_processing.cpp
+new file mode 100644
+index 00000000..94e8081d
+--- /dev/null
++++ b/src/libcamera/pipeline/isp/isp_processing.cpp
+@@ -0,0 +1,593 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2021, Siyuan Fan <siyuan.fan@foxmail.com>
++ *
++ * isp_processing.cpp - The software ISP class
++ */
++
++#include "isp_processing.h"
++
++#include <math.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <libcamera/request.h>
++
++#include "libcamera/base/log.h"
++
++namespace libcamera{
++
++LOG_DECLARE_CATEGORY(ISP)
++
++void ISP::autoContrast(uint16_t *data, float lowCut, float highCut, int width, int height)
++{
++        int blue, gr, gb, red;
++        int histBlue[1024] = {0}, histGb[1024] = {0}, histGr[1024] = {0}, histRed[1024] = {0};
++
++        int index;
++        for (int i = 0; i < height; i++) {
++                index = i * width;
++                for (int j = 0; j < width; j++) {
++                        if (i % 2 == 0 && j % 2 == 0) {
++                                blue = data[index];
++                                histBlue[blue]++;
++                        }
++                        else if ((i % 2 == 0 && j % 2 == 1)) {
++                                gb = data[index];
++                                histGb[gb]++;
++                        }
++                        else if ((i % 2 == 1 && j % 2 == 0)) {
++                                gr = data[index];
++                                histGr[gr]++;
++                        }
++                        else {
++                                red = data[index];
++                                histRed[red]++;
++                        }
++                        index++;
++                }    
++        }
++
++        int pixelAmount = width * height;
++        int sum = 0;
++        int minBlue;
++        for (int i = 0; i < 1024; i++){
++                sum = sum + histBlue[i];
++                if (sum >= pixelAmount * lowCut * 0.01) {
++                        minBlue = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int maxBlue;
++        for (int i = 1023; i >= 0; i--){
++                sum = sum + histBlue[i];
++                if (sum >= pixelAmount * highCut * 0.01) {
++                        maxBlue = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int minGb;
++        for (int i = 0; i < 1024; i++){
++                sum = sum + histGb[i];
++                if (sum >= pixelAmount * lowCut * 0.01) {
++                        minGb = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int maxGb;
++        for (int i = 1023; i >= 0; i--){
++                sum = sum + histGb[i];
++                if (sum >= pixelAmount * highCut * 0.01) {
++                        maxGb = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int minGr;
++        for (int i = 0; i < 1024; i++){
++                sum = sum + histGr[i];
++                if (sum >= pixelAmount * lowCut * 0.01) {
++                        minGr = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int maxGr;
++        for (int i = 1023; i >= 0; i--){
++                sum = sum + histGr[i];
++                if (sum >= pixelAmount * highCut * 0.01) {
++                        maxGr = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int minRed;
++        for (int i = 0; i < 1024; i++){
++                sum = sum + histRed[i];
++                if (sum >= pixelAmount * lowCut * 0.01) {
++                        minRed = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int maxRed;
++        for (int i = 1023; i >= 0; i--){
++                sum = sum + histRed[i];
++                if (sum >= pixelAmount * highCut * 0.01) {
++                        maxRed = i;
++                        break;
++                }
++        }
++
++        int blueMap[1024];
++        float norb = 1.0 / (maxBlue - minBlue);
++        for (int i = 0; i < 1024; i++) {
++                if (i < minBlue) {
++                        blueMap[i] = 0;
++                }
++                else if (i > maxBlue) {
++                        blueMap[i] = 1023;
++                }
++                else {
++                        blueMap[i] = (i - minBlue) * norb * 1023;
++                }
++                if (blueMap[i] > 1023) blueMap[i] = 1023;
++        }
++
++        int gbMap[1024];
++        float norgb = 1.0 / (maxGb - minGb);
++        for (int i = 0; i < 1024; i++) {
++                if (i < minGb) {
++                        gbMap[i] = 0;
++                }
++                else if (i > maxGb) {
++                        gbMap[i] = 1023;
++                }
++                else {
++                        gbMap[i] = (i - minGb) * norgb * 1023;
++                }
++                if (gbMap[i] > 1023) gbMap[i] = 1023;
++        }
++
++        int grMap[1024];
++        float norgr = 1.0 / (maxGr - minGr);
++        for (int i = 0; i < 1024; i++) {
++                if (i < minGr) {
++                        grMap[i] = 0;
++                }
++                else if (i > maxGr) {
++                        grMap[i] = 1023;
++                }
++                else {
++                        grMap[i] = (i - minGr) * norgr * 1023;
++                }
++                if (grMap[i] > 1023) grMap[i] = 1023;
++        }
++
++        int redMap[1024];
++        float norr = 1.0 / (maxRed - minRed);
++        for (int i = 0; i < 1024; i++) {
++                if (i < minRed) {
++                        redMap[i] = 0;
++                }
++                else if (i > maxRed) {
++                        redMap[i] = 1023;
++                }
++                else{
++                        redMap[i] = (i - minRed) * norr * 1023;
++                }
++                if (redMap[i] > 1023) redMap[i] = 1023;
++        }
++
++        for (int i = 0;i < height; i++) {
++                for (int j = 0; j < width; j++){
++                        index = i * width;
++                        if (i % 2 == 0 && j % 2 == 0) {
++                                data[index] = blueMap[data[index]];
++                        }    
++                        else if (i % 2 == 0 && j % 2 == 1) {
++                                data[index] = gbMap[data[index]];
++                        }    
++                        else if (i % 2 == 1 && j % 2 == 0) {
++                                data[index] = grMap[data[index]];
++                        }    
++                        else {
++                                data[index] = redMap[data[index]];
++                        }
++                        index++;
++                }
++        }
++}
++
++void ISP::blackLevelCorrect(uint16_t *data, uint16_t offset, int width, int height)
++{
++        int len = width * height;
++        for(int i = 0; i < len; i++) {
++                if (data[i] < offset){
++                        data[i] = 0;
++                }
++                else {
++                        data[i] -= offset;
++                }
++        }
++}
++
++void ISP::readChannels(uint16_t *data, uint16_t *R, uint16_t *G, uint16_t *B,
++                       int width, int height)
++{
++        int index;
++        for (int i = 0; i < height; i++) {
++                index = i * width;
++                for (int j = 0; j < width; j++) {
++                        if (i % 2 == 0 && j % 2 == 0) {
++                                B[index] = data[index];
++                        }
++                        else if ((i % 2 == 0 && j % 2 == 1) || (i % 2 == 1 && j % 2 == 0)){
++                                G[index] = data[index];
++                        }
++                        else {
++                                R[index] = data[index];
++                        }
++                        index++;
++                }
++        }
++}
++
++void ISP::firstPixelInsert(uint16_t *src, uint16_t *dst, int width, int height)
++{
++        int index;
++        for (int i = 0; i < height; i++) {
++                index = i * width;
++                for (int j = 0; j < width; j++){
++                        if (i % 2 == 0 && j % 2 == 1) {
++                                if (j == (width - 1)) {
++                                        dst[index] = src[index - 1];
++                                }
++                                else {
++                                        dst[index] = (src[index - 1] +
++                                                src[index + 1]) >> 1;
++                                }
++                        }
++
++                        if (i % 2 == 1 && j % 2 == 0) {
++                                if(i == height - 1) {
++                                        dst[index] = src[index - width];
++                                }
++                                else {
++                                        dst[index] = (src[index - width]+
++                                                src[index + width]) >> 1;
++                                }
++                        }
++    
++                        if (i % 2 == 1 && j % 2 == 1) {
++                                if (j < width - 1 && i < height - 1) {
++                                        dst[index] = (src[index - width - 1] +
++                                                src[index - width + 1] +
++                                                src[index + width - 1] +
++                                                src[index + width + 1]) >> 2;
++                                }
++                                else if (i == height - 1 && j < width - 1) {
++                                        dst[index] = (src[index - width - 1] +
++                                                src[index - width + 1]) >> 1;
++                                }
++                                else if (i < height - 1 && j == width - 1) {
++                                        dst[index] = (src[index - width - 1] +
++                                                src[index + width - 1]) >> 1;
++                                }
++                                else {
++                                        dst[index] = src[index - width - 1];
++                                }          
++                        }
++                        index++;
++                }
++        }
++}
++
++void ISP::twoPixelInsert(uint16_t *src, uint16_t *dst, int width, int height)
++{
++        int index;
++        for (int i = 0; i < height; i++) {
++                index = i * width;
++                for (int j = 0; j < width; j++) {
++                        if (i == 0 && j == 0) {
++                                dst[index] = (src[index + width] +
++                                        src[index + 1]) >> 1;
++                        }
++                        else if (i == 0 && j > 0 && j % 2 == 0) {
++                                dst[index] = (src[index - 1] +
++                                        src[index + width] +
++                                        src[index + 1]) / 3;
++                        }
++                        else if (i > 0 && j == 0 && i % 2 == 0) {
++                                dst[index] = (src[index - width] +
++                                        src[index + 1] +
++                                        src[index + width]) / 3;
++                        }
++                        else if (i == (height - 1) && j < (width - 1) && j % 2 == 1) {
++                                dst[index] = (src[index - 1] +
++                                        src[index - width] +
++                                        src[index + 1]) / 3;
++                        }
++                        else if (i < (height - 1) && j == (width - 1) && i % 2 == 1) {
++                                dst[index] = (src[index - width] +
++                                        src[index - 1] +
++                                        src[index + width]) / 3;
++                        }
++                        else if (i == (height - 1) && j == (width - 1)) {
++                                dst[index] = (src[index - width] +
++                                        src[index - 1]) >> 1;
++                        }
++                        else if ((i % 2 == 0 && j % 2 == 0) || (i % 2 == 1 && j % 2 == 1)) {
++                                dst[index] = (src[index - 1] +
++                                        src[index + 1] +
++                                        src[index - width] +
++                                        src[index + width]) / 4;
++                        }
++                        index++;
++                }
++        }
++}
++
++void ISP::lastPixelInsert(uint16_t *src, uint16_t *dst, int width, int height)
++{
++        int index;
++        for (int i = 0; i < height; i++) {
++                index = i * width;
++                for (int j = 0; j < width; j++){
++                        if (i % 2 == 1 && j % 2 == 0) {
++                                if (j == 0) {
++                                        dst[index] = src[index + 1];
++                                }
++                                else {
++                                        dst[index] = (src[index - 1] +
++                                                src[index + 1]) >> 1;
++                                }
++                        }
++
++                        if (i % 2 == 0 && j % 2 == 1) {
++                                if(i == 0) {
++                                        dst[index] = src[index + width];
++                                }
++                                else {
++                                        dst[index] = (src[index - width]+
++                                                src[index + width]) >> 1;
++                                }
++                        }
++
++                        if (i % 2 == 0 && j % 2 == 0) {
++                                if (i > 0 && j > 0) {
++                                        dst[index] = (src[index - width - 1] +
++                                                src[index - width + 1] +
++                                                src[index + width - 1] +
++                                                src[index + width + 1]) >> 2;
++                                }
++                                else if (i == 0 && j > 0) {
++                                        dst[index] = (src[index + width - 1] +
++                                                src[index + width + 1]) >> 1;
++                                }
++                                else if (i > 0 && j == 0) {
++                                        dst[index] = (src[index - width + 1] +
++                                                src[index + width + 1]) >> 1;
++                                }
++                                else {
++                                        dst[index] = src[index + width + 1];
++                                }
++                        }
++                        index++;
++                }
++        }
++}
++
++void ISP::demosaic(uint16_t *data, uint16_t *R, uint16_t *G, uint16_t *B,
++                   int width, int height)
++{
++        firstPixelInsert(data, B, width, height);
++        twoPixelInsert(data, G, width, height);
++        lastPixelInsert(data, R, width, height);
++}
++
++void ISP::autoWhiteBalance(uint16_t *R, uint16_t *G, uint16_t *B, int width, int height)
++{
++        float aveB = 0, aveG = 0, aveR = 0;
++        float Kb, Kg, Kr;
++
++        for (int i = 0; i < width * height; i++) {
++                aveB += 1.0 * B[i];
++                aveG += 1.0 * G[i];
++                aveR += 1.0 * R[i];
++        }
++
++        aveB *= (1.0 / (width * height));
++        aveG *= (1.0 / (width * height));
++        aveR *= (1.0 / (width * height));
++
++        Kr = (aveB + aveG + aveR) / aveR * (1.0 / 3.0);
++        Kg = (aveB + aveG + aveR) / aveG * (1.0 / 3.0);
++        Kb = (aveB + aveG + aveR) / aveB * (1.0 / 3.0);
++
++        for (int i = 0; i < width * height; i++) {
++                B[i] = B[i] * Kb;
++                G[i] = G[i] * Kg;
++                R[i] = R[i] * Kr;
++
++                if (R[i] > 1023) R[i] = 1023;
++                if (G[i] > 1023) G[i] = 1023;
++                if (R[i] > 1023) B[i] = 1023;
++        }
++}
++
++void ISP::gammaCorrect(uint16_t *R, uint16_t *G, uint16_t *B, float val,
++                       int width, int height)
++{
++        float nor = 1.0 / 1023.0;
++        float gamma = 1.0 / val;
++        for (int i = 0; i < width * height; i++) {
++                R[i] = pow(R[i] * nor, gamma) * 1023;
++                G[i] = pow(G[i] * nor, gamma) * 1023;
++                B[i] = pow(B[i] * nor, gamma) * 1023;
++
++                if (R[i] > 1023) R[i] = 1023;
++                if (G[i] > 1023) G[i] = 1023;
++                if (B[i] > 1023) B[i] = 1023;
++        }
++}
++
++void ISP::compress_10bit_to_8bit (uint16_t *src, uint8_t *dst, int width, int height)
++{
++        for (int i = 0; i < width * height; i++) {
++                dst[i] = src[i] >> 2 & 0xff;
++        }
++}
++
++float ISP::distance(int x, int y, int i, int j)
++{
++    return float(sqrt(pow(x - i, 2) + pow(y - j, 2)));
++}
++
++double ISP::gaussian(float x, double sigma)
++{
++    return exp(-(pow(x, 2)) / (2 * pow(sigma, 2))) / (2 * 3.1415926 * pow(sigma, 2));
++}
++
++void ISP::bilateralFilter(uint16_t *R, uint16_t *G, uint16_t *B,
++                          int diameter, double sigmaI,
++                          double sigmaS, int width, int height)
++{
++        for (int i = 2; i < height - 2; i++) {
++                for (int j = 2; j < width - 2; j++) {
++                        double iFiltered = 0;
++                        double wp = 0;
++                        int neighbor_x = 0;
++                        int neighbor_y = 0;
++                        int half = diameter / 2;
++
++                        for (int k = 0; k < diameter; k++) {
++                                for (int l = 0; l < diameter; l++) {
++                                        neighbor_x = i - (half - k);
++                                        neighbor_y = j - (half - l);
++                                        double gi = gaussian(R[neighbor_x * width + neighbor_y] - R[i * width +j], sigmaI);
++                                        double gs = gaussian(distance(i, j, neighbor_x, neighbor_y), sigmaS);
++                                        double w = gi * gs;
++                                        iFiltered = iFiltered + R[neighbor_x * width + neighbor_y] * w;
++                                        wp = wp + w;
++                                }    
++                        }
++
++                        iFiltered = iFiltered / wp;
++                        R[i * width + j] = iFiltered;
++                }
++        }
++
++        for (int i = 2; i < height - 2; i++) {
++                for (int j = 2; j < width - 2; j++) {
++                        double iFiltered = 0;
++                        double wp = 0;
++                        int neighbor_x = 0;
++                        int neighbor_y = 0;
++                        int half = diameter / 2;
++
++                        for (int k = 0; k < diameter; k++) {
++                                for (int l = 0; l < diameter; l++) {
++                                        neighbor_x = i - (half - k);
++                                        neighbor_y = j - (half - l);
++                                        double gi = gaussian(G[neighbor_x * width + neighbor_y] - G[i * width +j], sigmaI);
++                                        double gs = gaussian(distance(i, j, neighbor_x, neighbor_y), sigmaS);
++                                        double w = gi * gs;
++                                        iFiltered = iFiltered + G[neighbor_x * width + neighbor_y] * w;
++                                        wp = wp + w;
++                                }    
++                        }
++
++                        iFiltered = iFiltered / wp;
++                        G[i * width + j] = iFiltered;
++                }
++        }
++
++        for (int i = 2; i < height - 2; i++) {
++                for (int j = 2; j < width - 2; j++) {
++                        double iFiltered = 0;
++                        double wp = 0;
++                        int neighbor_x = 0;
++                        int neighbor_y = 0;
++                        int half = diameter / 2;
++
++                        for (int k = 0; k < diameter; k++) {
++                                for (int l = 0; l < diameter; l++) {
++                                        neighbor_x = i - (half - k);
++                                        neighbor_y = j - (half - l);
++                                        double gi = gaussian(B[neighbor_x * width + neighbor_y] - B[i * width +j], sigmaI);
++                                        double gs = gaussian(distance(i, j, neighbor_x, neighbor_y), sigmaS);
++                                        double w = gi * gs;
++                                        iFiltered = iFiltered + B[neighbor_x * width + neighbor_y] * w;
++                                        wp = wp + w;
++                                }    
++                        }
++
++                        iFiltered = iFiltered / wp;
++                        B[i * width + j] = iFiltered;
++                }
++        }
++}
++
++void ISP::processing(FrameBuffer *srcBuffer, FrameBuffer *dstBuffer, int width, int height)
++{
++        uint8_t *rgb_buf;
++        uint16_t *rawData;
++        uint16_t *rgbData = new std::uint16_t[width * height * 3];
++
++        uint16_t *rData = rgbData;
++        uint16_t *gData = rData + width * height;
++        uint16_t *bData = gData + width * height;
++        memset(rgbData, 0x0, width * height * 3);
++
++        const FrameBuffer::Plane &plane =  srcBuffer->planes()[0]; 
++        rawData = (uint16_t *)mmap(NULL, plane.length, PROT_READ|PROT_WRITE, MAP_SHARED, plane.fd.fd(), 0);
++        if (rawData == MAP_FAILED) {
++            LOG(ISP, Error) << "Read raw data failed";
++            ispCompleted.emit(dstBuffer);
++        }
++
++        blackLevelCorrect(rawData, 16, width, height);
++        readChannels(rawData, rData, gData, bData, width, height);
++        demosaic(rawData, rData, gData, bData, width, height);
++        autoWhiteBalance(rData, gData, bData, width, height);
++        autoContrast(rData, 0.01, 0.01, width, height);
++        autoContrast(gData, 0.01, 0.01, width, height);
++        autoContrast(bData, 0.01, 0.01, width, height);
++        gammaCorrect(rData, gData, bData, 2.2, width, height);
++        //bilateralFilter(rData, gData, bData, 5, 24.0, 32.0);
++    
++        const FrameBuffer::Plane &rgbPlane = dstBuffer->planes()[0];
++        rgb_buf = (uint8_t *)mmap(NULL, rgbPlane.length, PROT_READ|PROT_WRITE, MAP_SHARED, rgbPlane.fd.fd(), 0);
++        if (rgb_buf == MAP_FAILED) {
++                LOG(ISP, Error) << "Read rgb data failed";
++                ispCompleted.emit(dstBuffer);
++        }
++
++        uint8_t *rData_8 = rgb_buf;
++        uint8_t *gData_8 = rData_8 + width * height;
++        uint8_t *bData_8 = gData_8 + width * height;
++
++        compress_10bit_to_8bit(rData, rData_8, width, height);
++        compress_10bit_to_8bit(gData, gData_8, width, height);
++        compress_10bit_to_8bit(bData, bData_8, width, height);
++
++        delete[] rgbData;
++
++        ispCompleted.emit(dstBuffer);
++}
++
++} /* namespace libcamera */
++
+diff --git a/src/libcamera/pipeline/isp/isp_processing.h b/src/libcamera/pipeline/isp/isp_processing.h
+new file mode 100644
+index 00000000..b80b4218
+--- /dev/null
++++ b/src/libcamera/pipeline/isp/isp_processing.h
+@@ -0,0 +1,62 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2021, Siyuan Fan <siyuan.fan@foxmail.com>
++ *
++ * isp_processing.h - The software ISP class
++ */
++#ifndef __LIBCAMERA_PIPELINE_ISP_PROCESSING_H__
++#define __LIBCAMERA_PIPELINE_ISP_PROCESSING_H__
++
++#include <libcamera/framebuffer.h>
++
++#include "libcamera/base/signal.h"
++#include "libcamera/base/object.h"
++
++namespace libcamera{
++
++using std::uint16_t;
++using std::uint8_t;
++
++class ISP : public Object
++{
++public:
++        void autoContrast(uint16_t *data, float lowCut, float highCut, int width, int height);
++
++        void blackLevelCorrect(uint16_t *data, uint16_t offset, int width, int height);
++
++        void readChannels(uint16_t *data, uint16_t *R, uint16_t *G, uint16_t *B,
++                          int width, int height);
++
++        void firstPixelInsert(uint16_t *src, uint16_t *dst, int width, int height);
++
++        void twoPixelInsert(uint16_t *src, uint16_t *dst, int width, int height);
++
++        void lastPixelInsert(uint16_t *src, uint16_t *dst, int width, int height);
++
++        void demosaic(uint16_t *data, uint16_t *R, uint16_t *G, uint16_t *B,
++                      int width, int height);
++
++        void autoWhiteBalance(uint16_t *R, uint16_t *G, uint16_t *B, int width, int height);
++
++        void gammaCorrect(uint16_t *R, uint16_t *G, uint16_t *B, float val,
++                          int width, int height);
++
++        float distance(int x, int y, int i, int j);
++
++        double gaussian(float x, double sigma);
++
++        void bilateralFilter(uint16_t *R, uint16_t *G, uint16_t *B,
++                             int diameter, double sigmaI, double sigmaS,
++                             int width, int height);
++
++        void compress_10bit_to_8bit(uint16_t *src, uint8_t *dst, int width, int height);    
++
++        void processing(FrameBuffer *srcBuffer, FrameBuffer *dstBuffer, int width, int height);
++
++        Signal<FrameBuffer *> ispCompleted;
++
++};
++
++}
++
++#endif /* __LIBCAMERA_PIPELINE_ISP_PROCESSING_H__ */
+-- 
+2.20.1
+

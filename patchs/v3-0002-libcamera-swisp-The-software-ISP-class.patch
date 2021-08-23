@@ -1,0 +1,884 @@
+From 43e4288ded0ac0e8ce9b953163163680c23a667d Mon Sep 17 00:00:00 2001
+From: Fan Siyuan <siyuan.fan@foxmail.com>
+Date: Tue, 3 Aug 2021 13:09:53 +0100
+Subject: [libcamera-devel] [RFC PATCH v3 2/4] libcamera: swisp: The software
+ ISP class
+
+Currently class ISPCPU only supports to output RGB888 and BGR888(640x480).
+Based on format set by application, using getOutputPixelFormat() to match
+output format and compressAndTransformFormat() to transform corresponding format.
+
+Signed-off-by: Fan Siyuan <siyuan.fan@foxmail.com>
+---
+ src/libcamera/swisp/isp.cpp | 726 ++++++++++++++++++++++++++++++++++++
+ src/libcamera/swisp/isp.h   | 125 +++++++
+ 2 files changed, 851 insertions(+)
+ create mode 100644 src/libcamera/swisp/isp.cpp
+ create mode 100644 src/libcamera/swisp/isp.h
+
+diff --git a/src/libcamera/swisp/isp.cpp b/src/libcamera/swisp/isp.cpp
+new file mode 100644
+index 00000000..b0f801e9
+--- /dev/null
++++ b/src/libcamera/swisp/isp.cpp
+@@ -0,0 +1,726 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2021, Siyuan Fan <siyuan.fan@foxmail.com>
++ *
++ * isp.cpp - The software ISP class
++ */
++
++#include "isp.h"
++
++#include <math.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <libcamera/request.h>
++#include <libcamera/file_descriptor.h>
++
++#include "libcamera/base/log.h"
++
++namespace libcamera{
++
++LOG_DECLARE_CATEGORY(ISP)
++
++void ISPCPU::autoContrast(uint16_t *data, float lowCut, float highCut, int width, int height)
++{
++        int blue, gr, gb, red;
++        int histBlue[1024] = {0}, histGb[1024] = {0}, histGr[1024] = {0}, histRed[1024] = {0};
++
++        int index;
++        for (int i = 0; i < height; i++) {
++                index = i * width;
++                for (int j = 0; j < width; j++) {
++                        if (i % 2 == 0 && j % 2 == 0) {
++                                blue = data[index];
++                                histBlue[blue]++;
++                        }
++                        else if ((i % 2 == 0 && j % 2 == 1)) {
++                                gb = data[index];
++                                histGb[gb]++;
++                        }
++                        else if ((i % 2 == 1 && j % 2 == 0)) {
++                                gr = data[index];
++                                histGr[gr]++;
++                        }
++                        else {
++                                red = data[index];
++                                histRed[red]++;
++                        }
++                        index++;
++                }    
++        }
++
++        int pixelAmount = width * height;
++        int sum = 0;
++        int minBlue;
++        for (int i = 0; i < 1024; i++){
++                sum = sum + histBlue[i];
++                if (sum >= pixelAmount * lowCut * 0.01) {
++                        minBlue = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int maxBlue;
++        for (int i = 1023; i >= 0; i--){
++                sum = sum + histBlue[i];
++                if (sum >= pixelAmount * highCut * 0.01) {
++                        maxBlue = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int minGb;
++        for (int i = 0; i < 1024; i++){
++                sum = sum + histGb[i];
++                if (sum >= pixelAmount * lowCut * 0.01) {
++                        minGb = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int maxGb;
++        for (int i = 1023; i >= 0; i--){
++                sum = sum + histGb[i];
++                if (sum >= pixelAmount * highCut * 0.01) {
++                        maxGb = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int minGr;
++        for (int i = 0; i < 1024; i++){
++                sum = sum + histGr[i];
++                if (sum >= pixelAmount * lowCut * 0.01) {
++                        minGr = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int maxGr;
++        for (int i = 1023; i >= 0; i--){
++                sum = sum + histGr[i];
++                if (sum >= pixelAmount * highCut * 0.01) {
++                        maxGr = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int minRed;
++        for (int i = 0; i < 1024; i++){
++                sum = sum + histRed[i];
++                if (sum >= pixelAmount * lowCut * 0.01) {
++                        minRed = i;
++                        break;
++                }
++        }
++
++        sum = 0;
++        int maxRed;
++        for (int i = 1023; i >= 0; i--){
++                sum = sum + histRed[i];
++                if (sum >= pixelAmount * highCut * 0.01) {
++                        maxRed = i;
++                        break;
++                }
++        }
++
++        int blueMap[1024];
++        float norb = 1.0 / (maxBlue - minBlue);
++        for (int i = 0; i < 1024; i++) {
++                if (i < minBlue) {
++                        blueMap[i] = 0;
++                }
++                else if (i > maxBlue) {
++                        blueMap[i] = 1023;
++                }
++                else {
++                        blueMap[i] = (i - minBlue) * norb * 1023;
++                }
++                if (blueMap[i] > 1023) blueMap[i] = 1023;
++        }
++
++        int gbMap[1024];
++        float norgb = 1.0 / (maxGb - minGb);
++        for (int i = 0; i < 1024; i++) {
++                if (i < minGb) {
++                        gbMap[i] = 0;
++                }
++                else if (i > maxGb) {
++                        gbMap[i] = 1023;
++                }
++                else {
++                        gbMap[i] = (i - minGb) * norgb * 1023;
++                }
++                if (gbMap[i] > 1023) gbMap[i] = 1023;
++        }
++
++        int grMap[1024];
++        float norgr = 1.0 / (maxGr - minGr);
++        for (int i = 0; i < 1024; i++) {
++                if (i < minGr) {
++                        grMap[i] = 0;
++                }
++                else if (i > maxGr) {
++                        grMap[i] = 1023;
++                }
++                else {
++                        grMap[i] = (i - minGr) * norgr * 1023;
++                }
++                if (grMap[i] > 1023) grMap[i] = 1023;
++        }
++
++        int redMap[1024];
++        float norr = 1.0 / (maxRed - minRed);
++        for (int i = 0; i < 1024; i++) {
++                if (i < minRed) {
++                        redMap[i] = 0;
++                }
++                else if (i > maxRed) {
++                        redMap[i] = 1023;
++                }
++                else{
++                        redMap[i] = (i - minRed) * norr * 1023;
++                }
++                if (redMap[i] > 1023) redMap[i] = 1023;
++        }
++
++        for (int i = 0;i < height; i++) {
++                for (int j = 0; j < width; j++){
++                        index = i * width;
++                        if (i % 2 == 0 && j % 2 == 0) {
++                                data[index] = blueMap[data[index]];
++                        }    
++                        else if (i % 2 == 0 && j % 2 == 1) {
++                                data[index] = gbMap[data[index]];
++                        }    
++                        else if (i % 2 == 1 && j % 2 == 0) {
++                                data[index] = grMap[data[index]];
++                        }    
++                        else {
++                                data[index] = redMap[data[index]];
++                        }
++                        index++;
++                }
++        }
++}
++
++void ISPCPU::blackLevelCorrect(uint16_t *data, uint16_t offset, int width, int height)
++{
++        int len = width * height;
++        for(int i = 0; i < len; i++) {
++                if (data[i] < offset){
++                        data[i] = 0;
++                }
++                else {
++                        data[i] -= offset;
++                }
++        }
++}
++
++void ISPCPU::readChannels(uint16_t *data, uint16_t *R, uint16_t *G, uint16_t *B,
++                       int width, int height)
++{
++        int index;
++        for (int i = 0; i < height; i++) {
++                index = i * width;
++                for (int j = 0; j < width; j++) {
++                        if (i % 2 == 0 && j % 2 == 0) {
++                                B[index] = data[index];
++                        }
++                        else if ((i % 2 == 0 && j % 2 == 1) || (i % 2 == 1 && j % 2 == 0)){
++                                G[index] = data[index];
++                        }
++                        else {
++                                R[index] = data[index];
++                        }
++                        index++;
++                }
++        }
++}
++
++void ISPCPU::firstPixelInsert(uint16_t *src, uint16_t *dst, int width, int height)
++{
++        int index;
++        for (int i = 0; i < height; i++) {
++                index = i * width;
++                for (int j = 0; j < width; j++){
++                        if (i % 2 == 0 && j % 2 == 1) {
++                                if (j == (width - 1)) {
++                                        dst[index] = src[index - 1];
++                                }
++                                else {
++                                        dst[index] = (src[index - 1] +
++                                                src[index + 1]) >> 1;
++                                }
++                        }
++
++                        if (i % 2 == 1 && j % 2 == 0) {
++                                if(i == height - 1) {
++                                        dst[index] = src[index - width];
++                                }
++                                else {
++                                        dst[index] = (src[index - width]+
++                                                src[index + width]) >> 1;
++                                }
++                        }
++    
++                        if (i % 2 == 1 && j % 2 == 1) {
++                                if (j < width - 1 && i < height - 1) {
++                                        dst[index] = (src[index - width - 1] +
++                                                src[index - width + 1] +
++                                                src[index + width - 1] +
++                                                src[index + width + 1]) >> 2;
++                                }
++                                else if (i == height - 1 && j < width - 1) {
++                                        dst[index] = (src[index - width - 1] +
++                                                src[index - width + 1]) >> 1;
++                                }
++                                else if (i < height - 1 && j == width - 1) {
++                                        dst[index] = (src[index - width - 1] +
++                                                src[index + width - 1]) >> 1;
++                                }
++                                else {
++                                        dst[index] = src[index - width - 1];
++                                }          
++                        }
++                        index++;
++                }
++        }
++}
++
++void ISPCPU::twoPixelInsert(uint16_t *src, uint16_t *dst, int width, int height)
++{
++        int index;
++        for (int i = 0; i < height; i++) {
++                index = i * width;
++                for (int j = 0; j < width; j++) {
++                        if (i == 0 && j == 0) {
++                                dst[index] = (src[index + width] +
++                                        src[index + 1]) >> 1;
++                        }
++                        else if (i == 0 && j > 0 && j % 2 == 0) {
++                                dst[index] = (src[index - 1] +
++                                        src[index + width] +
++                                        src[index + 1]) / 3;
++                        }
++                        else if (i > 0 && j == 0 && i % 2 == 0) {
++                                dst[index] = (src[index - width] +
++                                        src[index + 1] +
++                                        src[index + width]) / 3;
++                        }
++                        else if (i == (height - 1) && j < (width - 1) && j % 2 == 1) {
++                                dst[index] = (src[index - 1] +
++                                        src[index - width] +
++                                        src[index + 1]) / 3;
++                        }
++                        else if (i < (height - 1) && j == (width - 1) && i % 2 == 1) {
++                                dst[index] = (src[index - width] +
++                                        src[index - 1] +
++                                        src[index + width]) / 3;
++                        }
++                        else if (i == (height - 1) && j == (width - 1)) {
++                                dst[index] = (src[index - width] +
++                                        src[index - 1]) >> 1;
++                        }
++                        else if ((i % 2 == 0 && j % 2 == 0) || (i % 2 == 1 && j % 2 == 1)) {
++                                dst[index] = (src[index - 1] +
++                                        src[index + 1] +
++                                        src[index - width] +
++                                        src[index + width]) / 4;
++                        }
++                        index++;
++                }
++        }
++}
++
++void ISPCPU::lastPixelInsert(uint16_t *src, uint16_t *dst, int width, int height)
++{
++        int index;
++        for (int i = 0; i < height; i++) {
++                index = i * width;
++                for (int j = 0; j < width; j++){
++                        if (i % 2 == 1 && j % 2 == 0) {
++                                if (j == 0) {
++                                        dst[index] = src[index + 1];
++                                }
++                                else {
++                                        dst[index] = (src[index - 1] +
++                                                src[index + 1]) >> 1;
++                                }
++                        }
++
++                        if (i % 2 == 0 && j % 2 == 1) {
++                                if(i == 0) {
++                                        dst[index] = src[index + width];
++                                }
++                                else {
++                                        dst[index] = (src[index - width]+
++                                                src[index + width]) >> 1;
++                                }
++                        }
++
++                        if (i % 2 == 0 && j % 2 == 0) {
++                                if (i > 0 && j > 0) {
++                                        dst[index] = (src[index - width - 1] +
++                                                src[index - width + 1] +
++                                                src[index + width - 1] +
++                                                src[index + width + 1]) >> 2;
++                                }
++                                else if (i == 0 && j > 0) {
++                                        dst[index] = (src[index + width - 1] +
++                                                src[index + width + 1]) >> 1;
++                                }
++                                else if (i > 0 && j == 0) {
++                                        dst[index] = (src[index - width + 1] +
++                                                src[index + width + 1]) >> 1;
++                                }
++                                else {
++                                        dst[index] = src[index + width + 1];
++                                }
++                        }
++                        index++;
++                }
++        }
++}
++
++void ISPCPU::demosaic(uint16_t *data, uint16_t *R, uint16_t *G, uint16_t *B,
++                       int width, int height)
++{
++        firstPixelInsert(data, B, width, height);
++        twoPixelInsert(data, G, width, height);
++        lastPixelInsert(data, R, width, height);
++}
++
++void ISPCPU::autoWhiteBalance(uint16_t *R, uint16_t *G, uint16_t *B, int width, int height)
++{
++        float aveB = 0, aveG = 0, aveR = 0;
++        float Kb, Kg, Kr;
++
++        for (int i = 0; i < width * height; i++) {
++                aveB += 1.0 * B[i];
++                aveG += 1.0 * G[i];
++                aveR += 1.0 * R[i];
++        }
++
++        aveB *= (1.0 / (width * height));
++        aveG *= (1.0 / (width * height));
++        aveR *= (1.0 / (width * height));
++
++        Kr = (aveB + aveG + aveR) / aveR * (1.0 / 3.0);
++        Kg = (aveB + aveG + aveR) / aveG * (1.0 / 3.0);
++        Kb = (aveB + aveG + aveR) / aveB * (1.0 / 3.0);
++
++        for (int i = 0; i < width * height; i++) {
++                B[i] = B[i] * Kb;
++                G[i] = G[i] * Kg;
++                R[i] = R[i] * Kr;
++
++                if (R[i] > 1023) R[i] = 1023;
++                if (G[i] > 1023) G[i] = 1023;
++                if (R[i] > 1023) B[i] = 1023;
++        }
++}
++
++void ISPCPU::gammaCorrect(uint16_t *R, uint16_t *G, uint16_t *B, float val, int width, int height)
++{
++        float nor = 1.0 / 1023.0;
++        float gamma = 1.0 / val;
++        for (int i = 0; i < width * height; i++) {
++                R[i] = pow(R[i] * nor, gamma) * 1023;
++                G[i] = pow(G[i] * nor, gamma) * 1023;
++                B[i] = pow(B[i] * nor, gamma) * 1023;
++
++                if (R[i] > 1023) R[i] = 1023;
++                if (G[i] > 1023) G[i] = 1023;
++                if (B[i] > 1023) B[i] = 1023;
++        }
++}
++
++void ISPCPU::compressAndTransformFormat(uint16_t *src, uint8_t *dst, int width, int height)
++{
++    switch(outputpixelformat)
++    {
++        case RGB888: {
++            int j = 0;
++            for (int i = 0; i < width * height; i++, j += 3) {
++                    dst[i] = src[j] >> 2 & 0xff;
++            }
++            
++            j = 1;
++            for (int i = 0; i < width * height; i++, j += 3) {
++                    dst[i + width * height] = src[j] >> 2 & 0xff;
++            }
++
++            j = 2;
++            for (int i = 0; i < width * height; i++, j += 3) {
++                    dst[i + width * height *2] = src[j] >> 2 & 0xff;
++            }
++            break;
++        }
++
++        case BGR888: {
++            int j = 2;
++            for (int i = 0; i < width * height; i++, j += 3) {
++                    dst[i] = src[j] >> 2 & 0xff;
++            }
++            
++            j = 1;
++            for (int i = 0; i < width * height; i++, j += 3) {
++                    dst[i + width * height] = src[j] >> 2 & 0xff;
++            }
++
++            j = 0;
++            for (int i = 0; i < width * height; i++, j += 3) {
++                    dst[i + width * height *2] = src[j] >> 2 & 0xff;
++            }
++            break;
++        }
++    }
++}
++
++float ISPCPU::distance(int x, int y, int i, int j)
++{
++    return float(sqrt(pow(x - i, 2) + pow(y - j, 2)));
++}
++
++double ISPCPU::gaussian(float x, double sigma)
++{
++    return exp(-(pow(x, 2)) / (2 * pow(sigma, 2))) / (2 * 3.1415926 * pow(sigma, 2));
++}
++
++void ISPCPU::bilateralFilter(uint16_t *R, uint16_t *G, uint16_t *B,
++                          int diameter, double sigmaI,
++                          double sigmaS, int width, int height)
++{
++        for (int i = 2; i < height - 2; i++) {
++                for (int j = 2; j < width - 2; j++) {
++                        double iFiltered = 0;
++                        double wp = 0;
++                        int neighbor_x = 0;
++                        int neighbor_y = 0;
++                        int half = diameter / 2;
++
++                        for (int k = 0; k < diameter; k++) {
++                                for (int l = 0; l < diameter; l++) {
++                                        neighbor_x = i - (half - k);
++                                        neighbor_y = j - (half - l);
++                                        double gi = gaussian(R[neighbor_x * width + neighbor_y] - R[i * width +j], sigmaI);
++                                        double gs = gaussian(distance(i, j, neighbor_x, neighbor_y), sigmaS);
++                                        double w = gi * gs;
++                                        iFiltered = iFiltered + R[neighbor_x * width + neighbor_y] * w;
++                                        wp = wp + w;
++                                }    
++                        }
++
++                        iFiltered = iFiltered / wp;
++                        R[i * width + j] = iFiltered;
++                }
++        }
++
++        for (int i = 2; i < height - 2; i++) {
++                for (int j = 2; j < width - 2; j++) {
++                        double iFiltered = 0;
++                        double wp = 0;
++                        int neighbor_x = 0;
++                        int neighbor_y = 0;
++                        int half = diameter / 2;
++
++                        for (int k = 0; k < diameter; k++) {
++                                for (int l = 0; l < diameter; l++) {
++                                        neighbor_x = i - (half - k);
++                                        neighbor_y = j - (half - l);
++                                        double gi = gaussian(G[neighbor_x * width + neighbor_y] - G[i * width +j], sigmaI);
++                                        double gs = gaussian(distance(i, j, neighbor_x, neighbor_y), sigmaS);
++                                        double w = gi * gs;
++                                        iFiltered = iFiltered + G[neighbor_x * width + neighbor_y] * w;
++                                        wp = wp + w;
++                                }    
++                        }
++
++                        iFiltered = iFiltered / wp;
++                        G[i * width + j] = iFiltered;
++                }
++        }
++
++        for (int i = 2; i < height - 2; i++) {
++                for (int j = 2; j < width - 2; j++) {
++                        double iFiltered = 0;
++                        double wp = 0;
++                        int neighbor_x = 0;
++                        int neighbor_y = 0;
++                        int half = diameter / 2;
++
++                        for (int k = 0; k < diameter; k++) {
++                                for (int l = 0; l < diameter; l++) {
++                                        neighbor_x = i - (half - k);
++                                        neighbor_y = j - (half - l);
++                                        double gi = gaussian(B[neighbor_x * width + neighbor_y] - B[i * width +j], sigmaI);
++                                        double gs = gaussian(distance(i, j, neighbor_x, neighbor_y), sigmaS);
++                                        double w = gi * gs;
++                                        iFiltered = iFiltered + B[neighbor_x * width + neighbor_y] * w;
++                                        wp = wp + w;
++                                }    
++                        }
++
++                        iFiltered = iFiltered / wp;
++                        B[i * width + j] = iFiltered;
++                }
++        }
++}
++
++void ISPCPU::noiseReduction(uint16_t *R, uint16_t *G, uint16_t *B, int width, int height)
++{
++        bilateralFilter(R, G, B, 5, 24.0, 32.0, width, height);
++}
++
++void ISPCPU::processing(FrameBuffer *srcBuffer, FrameBuffer *dstBuffer, int width, int height)
++{
++        uint8_t *rgb_buf;
++        uint16_t *rawData;
++        uint16_t *rgbData = new std::uint16_t[width * height * 3];
++
++        uint16_t *rData = rgbData;
++        uint16_t *gData = rData + width * height;
++        uint16_t *bData = gData + width * height;
++        memset(rgbData, 0x0, width * height * 3);
++
++        const FrameBuffer::Plane &plane =  srcBuffer->planes()[0]; 
++        rawData = (uint16_t *)mmap(NULL, plane.length, PROT_READ|PROT_WRITE, MAP_SHARED, plane.fd.fd(), 0);
++        if (rawData == MAP_FAILED) {
++            LOG(ISP, Error) << "Read raw data failed";
++            ispCompleted.emit(srcBuffer, dstBuffer);
++        }
++
++        blackLevelCorrect(rawData, 16, width, height);
++        readChannels(rawData, rData, gData, bData, width, height);
++        demosaic(rawData, rData, gData, bData, width, height);
++        autoWhiteBalance(rData, gData, bData, width, height);
++        autoContrast(rData, 0.01, 0.01, width, height);
++        autoContrast(gData, 0.01, 0.01, width, height);
++        autoContrast(bData, 0.01, 0.01, width, height);
++        gammaCorrect(rData, gData, bData, 2.2, width, height);
++        //bilateralFilter(rData, gData, bData, 5, 24.0, 32.0, width, height);
++    
++        const FrameBuffer::Plane &rgbPlane = dstBuffer->planes()[0];
++        rgb_buf = (uint8_t *)mmap(NULL, rgbPlane.length, PROT_READ|PROT_WRITE, MAP_SHARED, rgbPlane.fd.fd(), 0);
++        if (rgb_buf == MAP_FAILED) {
++                LOG(ISP, Error) << "Read rgb data failed";
++                ispCompleted.emit(srcBuffer, dstBuffer);
++        }
++
++        compressAndTransformFormat(rgbData, rgb_buf, width, height);
++
++        dstBuffer->metadata_.status = srcBuffer->metadata().status;
++        dstBuffer->metadata_.sequence = srcBuffer->metadata().sequence;
++        dstBuffer->metadata_.timestamp = srcBuffer->metadata().timestamp;
++
++        dstBuffer->metadata_.planes.clear();
++        dstBuffer->metadata_.planes.push_back({rgbPlane.length});
++
++        delete[] rgbData;
++
++        ispCompleted.emit(srcBuffer, dstBuffer);
++}
++
++ISPCPU::outputPixelFormat ISPCPU::getOutputPixelFormat(PixelFormat format)
++{
++        static const std::map<PixelFormat, outputPixelFormat> transform {
++                {formats::RGB888, RGB888},
++                {formats::BGR888, BGR888},
++        };
++
++        auto itr = transform.find(format);
++        return itr->second;
++}
++
++std::map<PixelFormat, std::vector<SizeRange>> ISPCPU::pixelFormatConfiguration()
++{
++        SizeRange sizeRange({640, 480});
++        std::vector<SizeRange> sizeRanges({std::move(sizeRange)});
++        ispFormat.insert({formats::RGB888, sizeRanges});
++        ispFormat.insert({formats::BGR888, sizeRanges});
++
++        return ispFormat;
++}
++
++void ISPCPU::paramConfiguration()
++{
++        struct BLC_PARAM blc = {16};
++
++        struct LSC_PARAM lsc_grid = {
++                {{1.4305, 1.4355, 1.4390, 1.4440, 1.4530, 1.4640, 1.4740, 1.4800, 1.4810, 1.4800, 1.4710, 1.4615, 1.4525, 1.4480, 1.4410, 1.4405},
++                {1.4315, 1.4370, 1.4425, 1.4520, 1.4635, 1.4760, 1.4855, 1.4955, 1.4955, 1.4920, 1.4830, 1.4695, 1.4590, 1.4510, 1.4445, 1.4405},
++                {1.4335, 1.4410, 1.4500, 1.4625, 1.4755, 1.4920, 1.5055, 1.5155, 1.5170, 1.5165, 1.4975, 1.4830, 1.4680, 1.4540, 1.4475, 1.4425},
++                {1.4325, 1.4430, 1.4550, 1.4705, 1.4920, 1.5070, 1.5250, 1.5370, 1.5380, 1.5325, 1.5165, 1.4975, 1.4750, 1.4575, 1.4490, 1.4455},
++                {1.4325, 1.4425, 1.4575, 1.4805, 1.5050, 1.5250, 1.5380, 1.5490, 1.5495, 1.5410, 1.5320, 1.5070, 1.4825, 1.4600, 1.4485, 1.4450},
++                {1.4315, 1.4425, 1.4575, 1.4805, 1.5055, 1.5270, 1.5470, 1.5550, 1.5550, 1.5465, 1.5325, 1.5080, 1.4825, 1.4600, 1.4455, 1.4430},
++                {1.4300, 1.4400, 1.4555, 1.4785, 1.5050, 1.5260, 1.5435, 1.5485, 1.5495, 1.5380, 1.5270, 1.5075, 1.4795, 1.4580, 1.4430, 1.4390},
++                {1.4275, 1.4345, 1.4480, 1.4690, 1.4965, 1.5135, 1.5275, 1.5370, 1.5365, 1.5270, 1.5105, 1.4965, 1.4725, 1.4525, 1.4390, 1.4335},
++                {1.4215, 1.4285, 1.4395, 1.4580, 1.4795, 1.4980, 1.5135, 1.5205, 1.5205, 1.5090, 1.4965, 1.4780, 1.4600, 1.4435, 1.4330, 1.4290},
++                {1.4165, 1.4230, 1.4300, 1.4410, 1.4590, 1.4795, 1.4955, 1.5005, 1.5005, 1.4885, 1.4780, 1.4600, 1.4500, 1.4360, 1.4310, 1.4250},
++                {1.4125, 1.4160, 1.4230, 1.4290, 1.4410, 1.4575, 1.4705, 1.4760, 1.4760, 1.4690, 1.4545, 1.4495, 1.4355, 1.4300, 1.4250, 1.4250},
++                {1.4100, 1.4135, 1.4175, 1.4230, 1.4290, 1.4410, 1.4545, 1.4560, 1.4560, 1.4525, 1.4485, 1.4365, 1.4305, 1.4235, 1.4230, 1.4250}},
++
++                {{1.2955, 1.2935, 1.2805, 1.2660, 1.2490, 1.234, 1.2320, 1.2320, 1.2325, 1.2365, 1.2425, 1.2550, 1.2690, 1.2810, 1.2875, 1.2905},
++                {1.2935, 1.2840, 1.2690, 1.2515, 1.2320, 1.2160, 1.2060, 1.2060, 1.2090, 1.2130, 1.2255, 1.2390, 1.2565, 1.2700, 1.2805, 1.2835},
++                {1.2860, 1.2710, 1.2525, 1.2320, 1.2160, 1.2030, 1.1890, 1.1860, 1.1865, 1.1955, 1.2055, 1.2240, 1.2370, 1.2550, 1.2715, 1.2780},
++                {1.2815, 1.2590, 1.2390, 1.2200, 1.2030, 1.1890, 1.1785, 1.1740, 1.1740, 1.1830, 1.1950, 1.2055, 1.2235, 1.2425, 1.2625, 1.2770},
++                {1.2805, 1.2560, 1.2330, 1.2125, 1.1960, 1.1795, 1.1735, 1.1660, 1.1660, 1.1730, 1.1830, 1.1960, 1.2145, 1.2360, 1.2575, 1.2730},
++                {1.2795, 1.2510, 1.2280, 1.2080, 1.1910, 1.1770, 1.1670, 1.1640, 1.1635, 1.1655, 1.1750, 1.1895, 1.2080, 1.2315, 1.2550, 1.2720},
++                {1.2795, 1.2510, 1.2265, 1.2070, 1.1910, 1.1770, 1.1680, 1.1640, 1.1630, 1.1645, 1.1740, 1.1870, 1.2060, 1.2315, 1.2550, 1.2715},
++                {1.2805, 1.2520, 1.2265, 1.2105, 1.1950, 1.1865, 1.1765, 1.1680, 1.1665, 1.1725, 1.1795, 1.1905, 1.2075, 1.2320, 1.2565, 1.2720},
++                {1.2815, 1.2585, 1.2350, 1.2195, 1.2090, 1.1975, 1.1880, 1.1820, 1.1805, 1.1810, 1.1905, 1.2025, 1.2185, 1.2385, 1.2625, 1.2750},
++                {1.2825, 1.2675, 1.2495, 1.2325, 1.2220, 1.2135, 1.2060, 1.2020, 1.2000, 1.1995, 1.2050, 1.2170, 1.2315, 1.2495, 1.2725, 1.2785},
++                {1.2825, 1.2740, 1.2640, 1.2460, 1.2360, 1.2290, 1.2235, 1.2215, 1.2200, 1.2185, 1.2195, 1.2285, 1.2415, 1.2565, 1.2750, 1.2850},
++                {1.2825, 1.2765, 1.2700, 1.2605, 1.2450, 1.2380, 1.2350, 1.2350, 1.2350, 1.2310, 1.2315, 1.2390, 1.2500, 1.2575, 1.2740, 1.2875}},
++        };	
++
++}
++
++int ISPCPU::exportBuffers(std::vector<std::unique_ptr<FrameBuffer>> *buffers,
++                       unsigned int count, int width, int height)
++{
++        int bufferByte = width * height * 3;
++
++        for (unsigned int i = 0; i < count; i++) {
++                std::string name = "frame-" + std::to_string(i);
++
++                const int isp_fd = memfd_create(name.c_str(), 0);
++                int ret = ftruncate(isp_fd, bufferByte);
++                if (ret < 0) {
++                        LOG(ISP, Error) << "Failed to resize memfd" << strerror(-ret);
++                        return ret;
++                }
++
++                FrameBuffer::Plane rgbPlane;
++                rgbPlane.fd = FileDescriptor(std::move(isp_fd));
++                rgbPlane.length = bufferByte;
++
++                std::vector<FrameBuffer::Plane> planes{rgbPlane};
++                buffers->emplace_back(std::make_unique<FrameBuffer>(std::move(planes)));
++        }
++
++        return count;
++}
++
++void ISPCPU::startThreadISP()
++{
++        moveToThread(&thread_);
++        thread_.start();
++}
++
++void ISPCPU::stopThreadISP()
++{
++        thread_.exit();
++        thread_.wait();
++}
++
++} /* namespace libcamera */
+diff --git a/src/libcamera/swisp/isp.h b/src/libcamera/swisp/isp.h
+new file mode 100644
+index 00000000..535f1b61
+--- /dev/null
++++ b/src/libcamera/swisp/isp.h
+@@ -0,0 +1,125 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2021, Siyuan Fan <siyuan.fan@foxmail.com>
++ *
++ * isp.h - The software ISP class
++ */
++#ifndef __LIBCAMERA_SWISP_ISP_H__
++#define __LIBCAMERA_SWISP_ISP_H__
++
++#include <map>
++
++#include <libcamera/formats.h>
++#include <libcamera/geometry.h>
++#include <libcamera/framebuffer.h>
++#include <libcamera/pixel_format.h>
++
++#include "libcamera/base/object.h"
++#include "libcamera/base/signal.h"
++#include "libcamera/base/thread.h"
++
++namespace libcamera{
++
++using std::uint16_t;
++using std::uint8_t;
++
++class ISP : public Object
++{
++public:
++        ISP() {}
++
++        virtual ~ISP() {}
++
++        enum outputPixelFormat {
++            RGB888,
++            BGR888,
++        };
++
++        virtual outputPixelFormat getOutputPixelFormat(PixelFormat format) = 0;
++
++        virtual void processing(FrameBuffer *srcBuffer, FrameBuffer *dstBuffer, int width, int height) = 0;
++
++        virtual std::map<PixelFormat, std::vector<SizeRange>> pixelFormatConfiguration() = 0;
++
++        virtual void paramConfiguration() = 0;
++
++        virtual int exportBuffers(std::vector<std::unique_ptr<FrameBuffer>> *buffers,
++                                  unsigned int count, int width, int height) = 0;
++
++        virtual void startThreadISP() = 0;
++
++        virtual void stopThreadISP() = 0;
++
++        Signal<FrameBuffer *, FrameBuffer *> ispCompleted;
++
++        std::map<PixelFormat, std::vector<SizeRange>> ispFormat;
++};
++
++class ISPCPU : public ISP
++{
++public:
++        struct BLC_PARAM {
++            uint16_t black_level;
++        };
++
++        struct LSC_PARAM {
++            float bGain[12][16];
++            float rGain[12][16];
++        };
++
++        outputPixelFormat getOutputPixelFormat(PixelFormat format) override;
++
++        void processing(FrameBuffer *srcBuffer, FrameBuffer *dstBuffer, int width, int height) override;
++
++        std::map<PixelFormat, std::vector<SizeRange>> pixelFormatConfiguration() override;
++
++        void paramConfiguration() override;
++
++        int exportBuffers(std::vector<std::unique_ptr<FrameBuffer>> *buffers,
++                           unsigned int count, int width, int height) override;
++
++        void startThreadISP() override;
++
++        void stopThreadISP() override;
++
++        enum outputPixelFormat outputpixelformat;
++
++private:
++        void autoContrast(uint16_t *data, float lowCut, float highCut, int width, int height);
++
++        void blackLevelCorrect(uint16_t *data, uint16_t offset, int width, int height);
++
++        void readChannels(uint16_t *data, uint16_t *R, uint16_t *G, uint16_t *B,
++                          int width, int height);
++
++        void firstPixelInsert(uint16_t *src, uint16_t *dst, int width, int height);
++
++        void twoPixelInsert(uint16_t *src, uint16_t *dst, int width, int height);
++
++        void lastPixelInsert(uint16_t *src, uint16_t *dst, int width, int height);
++
++        void demosaic(uint16_t *data, uint16_t *R, uint16_t *G, uint16_t *B,
++                      int width, int height);
++
++        void autoWhiteBalance(uint16_t *R, uint16_t *G, uint16_t *B, int width, int height);
++
++        void gammaCorrect(uint16_t *R, uint16_t *G, uint16_t *B, float val, int width, int height);
++
++        float distance(int x, int y, int i, int j);
++
++        double gaussian(float x, double sigma);
++
++        void bilateralFilter(uint16_t *R, uint16_t *G, uint16_t *B,
++                             int diameter, double sigmaI, double sigmaS,
++                             int width, int height);
++
++        void noiseReduction(uint16_t *R, uint16_t *G, uint16_t *B, int width, int height);
++
++        void compressAndTransformFormat(uint16_t *src, uint8_t *dst, int width, int height);    
++
++        Thread thread_;
++};
++
++} /* namespace libcamera */
++
++#endif /* __LIBCAMERA_SWISP_ISP_H__ */
+-- 
+2.20.1
+
